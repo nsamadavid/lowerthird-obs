@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+	<!--
+		Bilingual Full-Width Lower Third - OBS Browser Source
+		(companion of Animated Lower Thirds v1.6 - new standalone file, nothing else modified)
+
+		OBS setup:
+		- Add this file as a local Browser Source, 1920x1080, transparent background.
+		- Add "bilingual-control-panel.html" as a Custom Browser Dock (OBS -> Docks -> Custom Browser Docks).
+		- Both pages talk over BroadcastChannel, which works when both are loaded by OBS
+		  from local files (same origin), like the rest of this project.
+
+		URL params:
+		- ?mode=preview        : never auto-hides (active time ignored), body gets class "preview".
+		- ?demo=1              : standalone demo - ignores BroadcastChannel, sample texts,
+		                         dark background, plays IN after 300ms then loops
+		                         (hold 3.5s -> OUT -> hold 1.2s -> IN -> ...).
+		- ?demo=1&freeze=<ms>  : demo, but freezes the IN timeline exactly at <ms> milliseconds
+		                         (negative animation-delay + paused; no loop, no timers).
+		- ?demo=1&freezeout=<ms>: same but freezes the OUT timeline at <ms>.
+		- In demo mode any settings key (blt_*) may be passed as URL param to override it.
+	-->
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, minimum-scale=1.0, maximum-scale=1.0, user-scalable=0">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+	<title>Bilingual Lower Third Source</title>
+	<style>
+		@import url('https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,600;0,800;1,500;1,600;1,900&display=swap');
+
+		:root {
+			/* One root size unit: everything scales from --scale (%) */
+			--scale: 100;
+			--u: calc(1vw * var(--scale) / 100);
+			--accent-color: #E70046;
+			--bar-color: #FFFFFF;
+			--title-color: #E70046;
+			--sub-color: #1A1F1E;
+			--tag-text-color: #FFFFFF;
+			--bottom-offset: 5vh;
+			--side-inset: 0vw;
+			--anim-time: 2s;
+		}
+
+		html, body {
+			margin: 0;
+			padding: 0;
+			width: 100%;
+			height: 100%;
+			overflow: hidden;
+			background: transparent; /* OBS overlay */
+		}
+
+		body.demo { background: #111; }
+		body.preview { background: #17191c; }
+
+		/* ============================== Layout ============================== */
+
+		#bilingual-lt {
+			position: fixed;
+			left: var(--side-inset);
+			right: var(--side-inset);
+			bottom: var(--bottom-offset);
+			height: calc(6.2 * var(--u));
+			font-family: 'Montserrat', 'Segoe UI', Arial, sans-serif;
+		}
+
+		/* White main bar (revealed by scaleY from the line) */
+		.blt-bar-bg {
+			position: absolute;
+			inset: 0;
+			background: var(--bar-color);
+			transform-origin: 50% 100%;
+			z-index: 1;
+		}
+
+		/* Texts: EN left half, FR right half (mirrored) */
+		.bar-content {
+			position: absolute;
+			inset: 0;
+			z-index: 2;
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+		}
+
+		.section {
+			display: flex;
+			align-items: center;
+			max-width: 46%;
+			box-sizing: border-box;
+			overflow: hidden;
+		}
+		.section.en { padding-left: calc(2.2 * var(--u)); }
+		.section.fr { padding-right: calc(2.2 * var(--u)); flex-direction: row-reverse; }
+
+		.blt-chip {
+			display: inline-block;
+			flex: 0 0 auto;
+			background: var(--accent-color);
+			color: #fff;
+			font-weight: 800;
+			font-size: calc(0.95 * var(--u));
+			line-height: 1;
+			letter-spacing: 0.04em;
+			padding: calc(0.25 * var(--u)) calc(0.5 * var(--u));
+			transform: skewX(-12deg);
+		}
+		.section.en .blt-chip { margin-right: calc(1 * var(--u)); }
+		.section.fr .blt-chip { margin-left: calc(1 * var(--u)); }
+
+		.texts {
+			display: flex;
+			flex-direction: column;
+			min-width: 0;
+		}
+		.section.fr .texts { align-items: flex-end; text-align: right; }
+
+		.text-mask {
+			overflow: hidden;
+			padding-right: 0.14em; /* keeps the italic overhang from being clipped */
+		}
+		.text-mask + .text-mask { margin-top: calc(0.35 * var(--u)); }
+
+		.blt-title-inner {
+			font-weight: 900;
+			font-style: italic;
+			text-transform: uppercase;
+			/* --title-fit shrinks both titles when one would overflow its half */
+			font-size: calc(2.8 * var(--u) * var(--title-fit, 1));
+			/* 1.18 instead of 1 so FR accents (É, À) are not clipped by the mask */
+			line-height: 1.18;
+			letter-spacing: 0.01em;
+			color: var(--title-color);
+			white-space: nowrap;
+		}
+
+		.blt-sub-inner {
+			font-weight: 600;
+			font-style: italic;
+			text-transform: uppercase;
+			font-size: calc(1.15 * var(--u));
+			line-height: 1.25;
+			letter-spacing: 0.04em;
+			color: var(--sub-color);
+			white-space: nowrap;
+		}
+
+		/* Center skewed divider (wrapper does the centering, inner animates) */
+		.divider-pos {
+			position: absolute;
+			left: 50%;
+			top: 50%;
+			width: calc(0.28 * var(--u));
+			height: 68%;
+			transform: translate(-50%, -50%);
+			z-index: 2;
+		}
+		.blt-divider {
+			width: 100%;
+			height: 100%;
+			background: var(--accent-color);
+			transform: skewX(-12deg);
+		}
+
+		/* Red curtain, sweeps over the bar (above texts, below the line).
+		   Its bottom is inset a little so the white bar keeps a thin leading
+		   sliver visible under the red while the curtain passes (like the
+		   reference frames f_04/f_05/f_25). */
+		.blt-curtain {
+			position: absolute;
+			left: 0;
+			right: 0;
+			top: 0;
+			bottom: calc(0.35 * var(--u));
+			background: var(--accent-color);
+			transform-origin: 50% 100%;
+			z-index: 3;
+		}
+
+		/* Accent line sitting on the bar's bottom edge */
+		.blt-line {
+			position: absolute;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			height: calc(0.3 * var(--u));
+			background: var(--accent-color);
+			z-index: 4;
+		}
+
+		/* Tags: overflow-hidden masks glued to the bar's top/bottom edges,
+		   so tags emerge from BEHIND the bar */
+		.tag-mask {
+			position: absolute;
+			overflow: hidden;
+			z-index: 1;
+		}
+		.tag-mask.top { bottom: 100%; right: 0; }
+		.tag-mask.bottom { top: 100%; left: 0; }
+
+		.blt-tag {
+			height: calc(3.1 * var(--u)); /* ~50% of bar height */
+			display: flex;
+			align-items: center;
+			background: var(--accent-color);
+			color: var(--tag-text-color);
+			font-weight: 800;
+			font-size: calc(1.7 * var(--u)); /* ~55% of tag height */
+			letter-spacing: 0.02em;
+			padding: 0 1.2em;
+			white-space: nowrap;
+		}
+
+		/* Toggles */
+		#bilingual-lt.no-divider .divider-pos { display: none; }
+		#bilingual-lt.no-chips .blt-chip { display: none; }
+
+		/* ====================== Initial hidden state ======================= */
+
+		#bilingual-lt.hide-anim .blt-line { transform: scaleX(0); }
+		#bilingual-lt.hide-anim .blt-bar-bg,
+		#bilingual-lt.hide-anim .blt-curtain { transform: scaleY(0); }
+		#bilingual-lt.hide-anim .blt-title-inner { transform: translateY(125%); }
+		#bilingual-lt.hide-anim .blt-sub-inner { transform: translateY(130%); }
+		#bilingual-lt.hide-anim .blt-divider,
+		#bilingual-lt.hide-anim .blt-chip { opacity: 0; }
+		#bilingual-lt.hide-anim .tag-top { transform: translateY(105%); }
+		#bilingual-lt.hide-anim .tag-bottom { transform: translateY(-105%); }
+
+		/* ========================= Master timeline ==========================
+		   SINGLE-TIMELINE RULE: every animated element runs ONE animation with
+		   the SAME duration (var(--anim-time) for IN, 0.85x for OUT),
+		   fill-mode: both, NO animation-delay. All staggering lives in keyframe
+		   percentages; per-segment easing is declared inside the keyframes.
+		   This lets freeze mode stop the exact frame at time t with
+		   animation-delay:-t + animation-play-state:paused. */
+
+		#bilingual-lt.animation-in .blt-line      { animation: blt-line-in      var(--anim-time) both; }
+		#bilingual-lt.animation-in .blt-curtain   { animation: blt-curtain-in   var(--anim-time) both; }
+		#bilingual-lt.animation-in .blt-bar-bg    { animation: blt-bar-in       var(--anim-time) both; }
+		#bilingual-lt.animation-in .blt-title-inner { animation: blt-title-in   var(--anim-time) both; }
+		#bilingual-lt.animation-in .blt-sub-inner { animation: blt-sub-in       var(--anim-time) both; }
+		#bilingual-lt.animation-in .blt-divider   { animation: blt-divider-in   var(--anim-time) both; }
+		#bilingual-lt.animation-in .blt-chip      { animation: blt-chip-in      var(--anim-time) both; }
+		#bilingual-lt.animation-in .tag-top       { animation: blt-tag-top-in   var(--anim-time) both; }
+		#bilingual-lt.animation-in .tag-bottom    { animation: blt-tag-bottom-in var(--anim-time) both; }
+
+		#bilingual-lt.animation-out .blt-line      { animation: blt-line-out      calc(var(--anim-time) * 0.85) both; }
+		#bilingual-lt.animation-out .blt-curtain   { animation: blt-curtain-out   calc(var(--anim-time) * 0.85) both; }
+		#bilingual-lt.animation-out .blt-bar-bg    { animation: blt-bar-out       calc(var(--anim-time) * 0.85) both; }
+		#bilingual-lt.animation-out .blt-title-inner { animation: blt-title-out   calc(var(--anim-time) * 0.85) both; }
+		#bilingual-lt.animation-out .blt-sub-inner { animation: blt-sub-out       calc(var(--anim-time) * 0.85) both; }
+		#bilingual-lt.animation-out .blt-divider   { animation: blt-divider-out   calc(var(--anim-time) * 0.85) both; }
+		#bilingual-lt.animation-out .blt-chip      { animation: blt-chip-out      calc(var(--anim-time) * 0.85) both; }
+		#bilingual-lt.animation-out .tag-top       { animation: blt-tag-top-out   calc(var(--anim-time) * 0.85) both; }
+		#bilingual-lt.animation-out .tag-bottom    { animation: blt-tag-bottom-out calc(var(--anim-time) * 0.85) both; }
+
+		/* Freeze mode: stop the whole timeline at an exact time */
+		#bilingual-lt.freeze,
+		#bilingual-lt.freeze * {
+			animation-delay: var(--freeze-delay, 0ms) !important;
+			animation-play-state: paused !important;
+		}
+
+		/* ------------------------------ IN ------------------------------- */
+
+		/* 1. 0-20%: accent line wipes in from the left */
+		@keyframes blt-line-in {
+			0%   { transform: scaleX(0); transform-origin: 0% 50%; animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1); }
+			20%  { transform: scaleX(1); transform-origin: 0% 50%; }
+			100% { transform: scaleX(1); transform-origin: 0% 50%; }
+		}
+
+		/* 2+3. 21-31%: red curtain grows up from the line; 31-42%: exits upward */
+		@keyframes blt-curtain-in {
+			0%     { transform: scaleY(0); transform-origin: 50% 100%; }
+			21%    { transform: scaleY(0); transform-origin: 50% 100%; animation-timing-function: cubic-bezier(0.33, 1, 0.68, 1); }
+			31%    { transform: scaleY(1); transform-origin: 50% 100%; }
+			31.01% { transform: scaleY(1); transform-origin: 50% 0%; animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1); }
+			42%    { transform: scaleY(0); transform-origin: 50% 0%; }
+			100%   { transform: scaleY(0); transform-origin: 50% 0%; }
+		}
+
+		/* 4. 19-36%: white bar leads from the line, the curtain sweeps over it */
+		@keyframes blt-bar-in {
+			0%   { transform: scaleY(0); }
+			19%  { transform: scaleY(0); animation-timing-function: cubic-bezier(0.33, 1, 0.68, 1); }
+			36%  { transform: scaleY(1); }
+			100% { transform: scaleY(1); }
+		}
+
+		/* 5. 32-48%: titles rise out of their masks */
+		@keyframes blt-title-in {
+			0%   { transform: translateY(125%); }
+			32%  { transform: translateY(125%); animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+			48%  { transform: translateY(0%); }
+			100% { transform: translateY(0%); }
+		}
+
+		/* 5. 35-52%: subtitles follow */
+		@keyframes blt-sub-in {
+			0%   { transform: translateY(130%); }
+			35%  { transform: translateY(130%); animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+			52%  { transform: translateY(0%); }
+			100% { transform: translateY(0%); }
+		}
+
+		/* 5. 34-50%: divider + chips fade/scale in */
+		@keyframes blt-divider-in {
+			0%   { opacity: 0; transform: skewX(-12deg) scaleY(0.3); }
+			34%  { opacity: 0; transform: skewX(-12deg) scaleY(0.3); animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+			50%  { opacity: 1; transform: skewX(-12deg) scaleY(1); }
+			100% { opacity: 1; transform: skewX(-12deg) scaleY(1); }
+		}
+		@keyframes blt-chip-in {
+			0%   { opacity: 0; transform: skewX(-12deg) scale(0.6); }
+			34%  { opacity: 0; transform: skewX(-12deg) scale(0.6); animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+			50%  { opacity: 1; transform: skewX(-12deg) scale(1); }
+			100% { opacity: 1; transform: skewX(-12deg) scale(1); }
+		}
+
+		/* 6. 48-78%: tags slide out from behind the bar, then everything holds */
+		@keyframes blt-tag-top-in {
+			0%   { transform: translateY(105%); }
+			48%  { transform: translateY(105%); animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+			78%  { transform: translateY(0%); }
+			100% { transform: translateY(0%); }
+		}
+		@keyframes blt-tag-bottom-in {
+			0%   { transform: translateY(-105%); }
+			48%  { transform: translateY(-105%); animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+			78%  { transform: translateY(0%); }
+			100% { transform: translateY(0%); }
+		}
+
+		/* ------------------------------ OUT ------------------------------ */
+
+		/* 1. 0-30%: tags retract behind the bar */
+		@keyframes blt-tag-top-out {
+			0%   { transform: translateY(0%); animation-timing-function: cubic-bezier(0.55, 0, 0.68, 0.19); }
+			30%  { transform: translateY(105%); }
+			100% { transform: translateY(105%); }
+		}
+		@keyframes blt-tag-bottom-out {
+			0%   { transform: translateY(0%); animation-timing-function: cubic-bezier(0.55, 0, 0.68, 0.19); }
+			30%  { transform: translateY(-105%); }
+			100% { transform: translateY(-105%); }
+		}
+
+		/* 2. 15-45%: texts drop back into their masks; divider/chips fade */
+		@keyframes blt-title-out {
+			0%   { transform: translateY(0%); }
+			18%  { transform: translateY(0%); animation-timing-function: cubic-bezier(0.55, 0, 0.68, 0.19); }
+			45%  { transform: translateY(125%); }
+			100% { transform: translateY(125%); }
+		}
+		@keyframes blt-sub-out {
+			0%   { transform: translateY(0%); }
+			15%  { transform: translateY(0%); animation-timing-function: cubic-bezier(0.55, 0, 0.68, 0.19); }
+			42%  { transform: translateY(130%); }
+			100% { transform: translateY(130%); }
+		}
+		@keyframes blt-divider-out {
+			0%   { opacity: 1; transform: skewX(-12deg) scaleY(1); }
+			15%  { opacity: 1; transform: skewX(-12deg) scaleY(1); animation-timing-function: cubic-bezier(0.55, 0, 0.68, 0.19); }
+			40%  { opacity: 0; transform: skewX(-12deg) scaleY(0.3); }
+			100% { opacity: 0; transform: skewX(-12deg) scaleY(0.3); }
+		}
+		@keyframes blt-chip-out {
+			0%   { opacity: 1; transform: skewX(-12deg) scale(1); }
+			15%  { opacity: 1; transform: skewX(-12deg) scale(1); animation-timing-function: cubic-bezier(0.55, 0, 0.68, 0.19); }
+			40%  { opacity: 0; transform: skewX(-12deg) scale(0.6); }
+			100% { opacity: 0; transform: skewX(-12deg) scale(0.6); }
+		}
+
+		/* 3. 35-65%: red curtain sweeps down over the bar, both collapse to the line */
+		@keyframes blt-curtain-out {
+			0%     { transform: scaleY(0); transform-origin: 50% 0%; }
+			35%    { transform: scaleY(0); transform-origin: 50% 0%; animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1); }
+			50%    { transform: scaleY(1); transform-origin: 50% 0%; }
+			50.01% { transform: scaleY(1); transform-origin: 50% 100%; animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1); }
+			65%    { transform: scaleY(0); transform-origin: 50% 100%; }
+			100%   { transform: scaleY(0); transform-origin: 50% 100%; }
+		}
+		@keyframes blt-bar-out {
+			0%   { transform: scaleY(1); }
+			42%  { transform: scaleY(1); animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1); }
+			60%  { transform: scaleY(0); }
+			100% { transform: scaleY(0); }
+		}
+
+		/* 4. 60-92%: line wipes out to the right */
+		@keyframes blt-line-out {
+			0%   { transform: scaleX(1); transform-origin: 100% 50%; }
+			60%  { transform: scaleX(1); transform-origin: 100% 50%; animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1); }
+			92%  { transform: scaleX(0); transform-origin: 100% 50%; }
+			100% { transform: scaleX(0); transform-origin: 100% 50%; }
+		}
+	</style>
+  </head>
+  <body class="browser-source">
+		<!--Bilingual lower third-->
+		<div id="bilingual-lt" class="hide-anim">
+			<div class="blt-bar-bg"></div>
+			<div class="bar-content">
+				<div class="section en">
+					<span class="blt-chip">EN</span>
+					<div class="texts">
+						<div class="text-mask"><div class="blt-title-inner" id="blt-en-title"></div></div>
+						<div class="text-mask"><div class="blt-sub-inner" id="blt-en-sub"></div></div>
+					</div>
+				</div>
+				<div class="section fr">
+					<span class="blt-chip">FR</span>
+					<div class="texts">
+						<div class="text-mask"><div class="blt-title-inner" id="blt-fr-title"></div></div>
+						<div class="text-mask"><div class="blt-sub-inner" id="blt-fr-sub"></div></div>
+					</div>
+				</div>
+			</div>
+			<div class="divider-pos"><div class="blt-divider"></div></div>
+			<div class="blt-curtain"></div>
+			<div class="blt-line"></div>
+			<div class="tag-mask top"><div class="blt-tag tag-top" id="blt-tag-top"></div></div>
+			<div class="tag-mask bottom"><div class="blt-tag tag-bottom" id="blt-tag-bottom"></div></div>
+		</div>
+
+	<script type="text/javascript">
+		//Read a URL param (same helper as browser-source.html)
+		function getUrlParameter(sParam) {
+			let sPageURL = window.location.search.substring(1),
+				sURLVariables = sPageURL.split('&'),
+				sParameterName,
+				i;
+
+			for (i = 0; i < sURLVariables.length; i++) {
+				sParameterName = sURLVariables[i].split('=');
+
+				if (sParameterName[0] === sParam) {
+					return sParameterName[1] === undefined ? true : decodeURIComponent(sParameterName[1]);
+				}
+			}
+		};
+
+		const blt = document.getElementById("bilingual-lt");
+		const mode = getUrlParameter('mode');
+
+		if (mode == "preview") {
+			document.body.classList.add('preview');
+		}
+
+		//Defaults (same keys/values as the control panel + localStorage)
+		const DEFAULTS = {
+			blt_switch: "false",
+			blt_en_title: "WELCOME TO THE BROADCAST",
+			blt_en_sub: "The morning show — live",
+			blt_fr_title: "BIENVENUE À L'ÉMISSION",
+			blt_fr_sub: "L'émission du matin — en direct",
+			blt_tag_top: "LIVE • EN DIRECT",
+			blt_tag_bottom: "John Doe — Guest Speaker / Invité",
+			blt_accent_color: "#E70046",
+			blt_bar_color: "#FFFFFF",
+			blt_title_color: "#E70046",
+			blt_sub_color: "#1A1F1E",
+			blt_tag_text_color: "#FFFFFF",
+			blt_scale: "100",
+			blt_bottom_offset: "5",
+			blt_side_inset: "0",
+			blt_anim_time: "2",
+			blt_active_time: "",
+			blt_divider_switch: "true",
+			blt_chips_switch: "true"
+		};
+
+		let currentAnimMs = 2000;
+		let shown = false;
+		let hideTimer;
+
+		//Write texts + CSS vars. Never touches the animation classes, so live
+		//settings/text tweaks update the graphic without replaying the animation.
+		function applySettings(d) {
+			document.getElementById("blt-en-title").innerHTML = d.blt_en_title || "";
+			document.getElementById("blt-en-sub").innerHTML = d.blt_en_sub || "";
+			document.getElementById("blt-fr-title").innerHTML = d.blt_fr_title || "";
+			document.getElementById("blt-fr-sub").innerHTML = d.blt_fr_sub || "";
+			document.getElementById("blt-tag-top").innerHTML = d.blt_tag_top || "";
+			document.getElementById("blt-tag-bottom").innerHTML = d.blt_tag_bottom || "";
+
+			const root = document.documentElement.style;
+			root.setProperty('--accent-color', d.blt_accent_color || DEFAULTS.blt_accent_color);
+			root.setProperty('--bar-color', d.blt_bar_color || DEFAULTS.blt_bar_color);
+			root.setProperty('--title-color', d.blt_title_color || DEFAULTS.blt_title_color);
+			root.setProperty('--sub-color', d.blt_sub_color || DEFAULTS.blt_sub_color);
+			root.setProperty('--tag-text-color', d.blt_tag_text_color || DEFAULTS.blt_tag_text_color);
+			root.setProperty('--scale', d.blt_scale || DEFAULTS.blt_scale);
+			root.setProperty('--bottom-offset', (d.blt_bottom_offset || d.blt_bottom_offset === "0" ? d.blt_bottom_offset : DEFAULTS.blt_bottom_offset) + "vh");
+			root.setProperty('--side-inset', (d.blt_side_inset || "0") + "vw");
+
+			const animSecs = Number(d.blt_anim_time) || 2;
+			root.setProperty('--anim-time', animSecs + "s");
+			currentAnimMs = animSecs * 1000;
+
+			blt.classList.toggle('no-divider', d.blt_divider_switch === "false");
+			blt.classList.toggle('no-chips', d.blt_chips_switch === "false");
+
+			fitTitles();
+		}
+
+		//Shrink BOTH titles by the same factor if one would overflow its half,
+		//so a long title is never clipped mid-word (layout never breaks).
+		function fitTitles() {
+			const root = document.documentElement.style;
+			root.setProperty('--title-fit', 1);
+			let fit = 1;
+			document.querySelectorAll('.blt-title-inner').forEach(function (el) {
+				const mask = el.parentElement;
+				if (el.scrollWidth > mask.clientWidth && el.scrollWidth > 0) {
+					fit = Math.min(fit, Math.max((mask.clientWidth / el.scrollWidth) * 0.98, 0.5));
+				}
+			});
+			root.setProperty('--title-fit', fit);
+		}
+
+		window.addEventListener('resize', fitTitles);
+		if (document.fonts && document.fonts.ready) {
+			document.fonts.ready.then(fitTitles); //re-measure once Montserrat is in
+		}
+
+		//Class swaps with a forced reflow, same trick as browser-source.html
+		function playIn() {
+			blt.classList.remove("hide-anim");
+			blt.classList.remove("animation-out");
+			void blt.offsetWidth;
+			blt.classList.add("animation-in");
+		}
+
+		function playOut() {
+			blt.classList.remove("animation-in");
+			void blt.offsetWidth;
+			blt.classList.add("animation-out");
+		}
+
+		const demo = getUrlParameter('demo');
+		const freezeParam = getUrlParameter('freeze');
+		const freezeOutParam = getUrlParameter('freezeout');
+
+		if (demo) {
+			//Standalone demo mode: no BroadcastChannel, sample texts, dark background
+			document.body.classList.add('demo');
+
+			const d = {};
+			for (const k in DEFAULTS) {
+				const v = getUrlParameter(k);
+				d[k] = (v === undefined || v === true) ? DEFAULTS[k] : v;
+			}
+			applySettings(d);
+
+			if (freezeParam !== undefined || freezeOutParam !== undefined) {
+				//Freeze the master timeline at an exact millisecond:
+				//negative animation-delay + paused play-state on every animated element.
+				//If <ms> exceeds the duration, fill-mode:both simply shows the 100% frame.
+				const isIn = (freezeParam !== undefined);
+				const ms = Number(isIn ? freezeParam : freezeOutParam) || 0;
+				blt.style.setProperty('--freeze-delay', (-ms) + "ms");
+				blt.classList.remove("hide-anim");
+				blt.classList.add("freeze");
+				void blt.offsetWidth;
+				blt.classList.add(isIn ? "animation-in" : "animation-out");
+			} else {
+				//Loop: IN -> hold 3.5s -> OUT -> hold 1.2s -> IN -> ...
+				setTimeout(function demoCycle() {
+					playIn();
+					setTimeout(function () {
+						playOut();
+						setTimeout(demoCycle, Math.round(currentAnimMs * 0.85) + 1200);
+					}, currentAnimMs + 3500);
+				}, 300);
+			}
+		} else {
+			const bcp = new BroadcastChannel('bilingual-lt-channel');  //Receives from the Control Panel
+			const bcr = new BroadcastChannel('bilingual-lt-channel2'); //Sends to the Control Panel
+
+			bcp.onmessage = function (ev) {
+				const d = ev.data;
+
+				//Preview dock "Replay animation" button
+				if (d.preview_replay) {
+					if (mode == "preview" && shown) {
+						playOut();
+						setTimeout(playIn, Math.round(currentAnimMs * 0.85) + 150);
+					}
+					return;
+				}
+
+				applySettings(d);
+
+				let sw = (d.blt_switch === "true");
+				//Both titles empty -> never show an empty bar
+				if (!(d.blt_en_title || "").length && !(d.blt_fr_title || "").length) {
+					sw = false;
+				}
+
+				//Only animate on switch CHANGES (same state = live update, no replay)
+				if (sw && !shown) {
+					shown = true;
+					playIn();
+				} else if (!sw && shown) {
+					shown = false;
+					playOut();
+				}
+
+				//Auto-hide: IN duration + active time, ignored in preview mode.
+				//Any new "true"/active-time message resets the countdown.
+				clearTimeout(hideTimer);
+				const activeSecs = Number(d.blt_active_time);
+				if (shown && mode != "preview" && activeSecs > 0) {
+					hideTimer = setTimeout(function () {
+						shown = false;
+						playOut();
+						bcr.postMessage({ turnedOff: true });
+					}, currentAnimMs + activeSecs * 1000);
+				}
+			};
+
+			//Ask the Control Panel for the current settings
+			bcr.postMessage({ resend: true });
+		}
+	</script>
+
+  </body>
+</html>

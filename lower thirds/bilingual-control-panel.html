@@ -1,0 +1,569 @@
+<!--
+	Bilingual Full-Width Lower Third — CONTROL PANEL (OBS Custom Browser Dock)
+	Add-on for the "Animated Lower Thirds" project. Fully self-contained (inline CSS + vanilla JS).
+
+	OBS setup:
+	- Browser Source: add "bilingual-browser-source.html" as a LOCAL FILE source, 1920x1080, transparent.
+	- Dock: OBS -> Docks -> Custom Browser Docks... -> point at THIS file (bilingual-control-panel.html).
+	- BroadcastChannel requires both pages to load from the same origin (local files in OBS = fine,
+	  same as the rest of this project).
+
+	Protocol:
+	- "bilingual-lt-channel"  : panel -> source, full flat settings object (blt_* keys, string values).
+	- "bilingual-lt-channel2" : source -> panel, {resend:true} on source load, {turnedOff:true} after auto-hide.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bilingual Lower Third</title>
+<style>
+	:root {
+		--bg: #1a1c20;
+		--card: #26292e;
+		--card-border: #313439;
+		--field: #17191c;
+		--border: #3a3d42;
+		--text: #cfd2d6;
+		--muted: #8b9096;
+		--accent: #e70046;
+		color-scheme: dark;
+	}
+
+	* { box-sizing: border-box; }
+
+	html, body {
+		margin: 0;
+		padding: 0;
+	}
+
+	body {
+		background: var(--bg);
+		color: var(--text);
+		font: normal 12px -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+		overflow-x: hidden;
+		user-select: none;
+	}
+
+	::-webkit-scrollbar { width: 10px; }
+	::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+	::-webkit-scrollbar-track { background: transparent; }
+
+	.panel {
+		max-width: 520px;
+		margin: 0 auto;
+		padding: 10px 10px 18px;
+	}
+
+	/* Header + master switch */
+	.panel-head h1 {
+		display: flex;
+		align-items: center;
+		font-size: 14px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		margin: 2px 0 10px;
+	}
+	.panel-head h1::before {
+		content: "";
+		display: inline-block;
+		width: 4px;
+		height: 13px;
+		background: var(--accent);
+		border-radius: 2px;
+		margin-right: 8px;
+		flex: none;
+	}
+
+	.switch-btn {
+		display: block;
+		width: 100%;
+		padding: 10px 8px;
+		margin: 0 0 12px;
+		font: inherit;
+		font-size: 13px;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: #e8eaed;
+		background: #3a3d42;
+		border: 1px solid #46494f;
+		border-radius: 5px;
+		cursor: pointer;
+		transition: background 0.15s, box-shadow 0.15s, border-color 0.15s;
+	}
+	.switch-btn:hover { background: #46494f; }
+	.switch-btn.on {
+		background: var(--accent);
+		border-color: #ff2d6e;
+		color: #ffffff;
+		box-shadow: 0 0 12px rgba(231, 0, 70, 0.45);
+	}
+	.switch-btn.on:hover { background: #ff0a55; }
+
+	/* Fieldsets (cards) */
+	fieldset {
+		background: var(--card);
+		border: 1px solid var(--card-border);
+		border-radius: 6px;
+		padding: 9px 10px 4px;
+		margin: 0 0 10px;
+		min-width: 0;
+	}
+	legend {
+		padding: 0 6px;
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.09em;
+		color: var(--muted);
+	}
+
+	.field {
+		display: block;
+		margin: 0 0 8px;
+	}
+	.lbl {
+		display: block;
+		font-size: 11px;
+		color: var(--muted);
+		margin: 0 0 3px;
+	}
+
+	input[type="text"],
+	input[type="number"] {
+		width: 100%;
+		font: inherit;
+		color: var(--text);
+		background: var(--field);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		padding: 5px 7px;
+	}
+	input[type="text"]:focus,
+	input[type="number"]:focus {
+		border-color: #5a86b4;
+		outline: none;
+	}
+
+	/* Style grid (colors + toggles) */
+	.style-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 4px 8px;
+	}
+	.style-grid .field { margin-bottom: 4px; }
+
+	input[type="color"] {
+		display: block;
+		width: 100%;
+		height: 26px;
+		padding: 2px;
+		background: var(--field);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		cursor: pointer;
+	}
+	input[type="color"]::-webkit-color-swatch-wrapper { padding: 1px; }
+	input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
+
+	.check-cell {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		margin: 4px 0 8px;
+		cursor: pointer;
+		font-size: 11px;
+	}
+	.check-cell input[type="checkbox"] {
+		width: 13px;
+		height: 13px;
+		margin: 0;
+		accent-color: var(--accent);
+		cursor: pointer;
+	}
+
+	/* Layout & timing rows */
+	.row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 0 0 8px;
+	}
+	.row-lbl {
+		flex: 1;
+		min-width: 0;
+		font-size: 11px;
+		color: var(--muted);
+	}
+	.row input[type="number"] { width: 5em; flex: none; text-align: right; }
+
+	input[type="range"] {
+		-webkit-appearance: none;
+		appearance: none;
+		flex: 1;
+		min-width: 0;
+		height: 4px;
+		background: var(--border);
+		border-radius: 2px;
+		outline: none;
+		cursor: pointer;
+	}
+	input[type="range"]::-webkit-slider-thumb {
+		-webkit-appearance: none;
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		background: var(--accent);
+		border: none;
+		cursor: pointer;
+	}
+	.readout {
+		flex: none;
+		width: 3.6em;
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+		color: var(--text);
+	}
+	.hint {
+		font-size: 10px;
+		color: var(--muted);
+		margin: -4px 0 8px;
+	}
+
+	/* Preview */
+	.preview-box {
+		position: relative;
+		width: 100%;
+		padding-top: 56.25%; /* 16:9 */
+		overflow: hidden;
+		background: #111;
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		margin: 0 0 8px;
+	}
+	.preview-box iframe {
+		position: absolute;
+		top: 0;
+		left: 0;
+		width: 1920px;
+		height: 1080px;
+		border: 0;
+		transform-origin: top left;
+		pointer-events: none;
+	}
+
+	.small-btn {
+		display: block;
+		width: 100%;
+		padding: 7px 8px;
+		margin: 0 0 8px;
+		font: inherit;
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		color: var(--text);
+		background: #3a3d42;
+		border: 1px solid #46494f;
+		border-radius: 4px;
+		cursor: pointer;
+		transition: background 0.15s;
+	}
+	.small-btn:hover { background: #46494f; }
+
+	/* Footer */
+	.panel-foot { margin-top: 2px; }
+	.reset-btn {
+		display: block;
+		width: 100%;
+		padding: 7px 8px;
+		font: inherit;
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--muted);
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		cursor: pointer;
+		transition: color 0.15s, border-color 0.15s;
+	}
+	.reset-btn:hover {
+		color: #ff5c8b;
+		border-color: #7a2c44;
+	}
+</style>
+</head>
+<body>
+<div class="panel">
+
+	<header class="panel-head">
+		<h1>Bilingual Lower Third</h1>
+		<button id="blt-switch-btn" class="switch-btn" type="button">SHOW</button>
+	</header>
+
+	<fieldset>
+		<legend>English</legend>
+		<label class="field"><span class="lbl">Title</span>
+			<input type="text" id="blt_en_title" spellcheck="false"></label>
+		<label class="field"><span class="lbl">Subtitle</span>
+			<input type="text" id="blt_en_sub" spellcheck="false"></label>
+	</fieldset>
+
+	<fieldset>
+		<legend>Français</legend>
+		<label class="field"><span class="lbl">Titre</span>
+			<input type="text" id="blt_fr_title" spellcheck="false"></label>
+		<label class="field"><span class="lbl">Sous-titre</span>
+			<input type="text" id="blt_fr_sub" spellcheck="false"></label>
+	</fieldset>
+
+	<fieldset>
+		<legend>Tags</legend>
+		<label class="field"><span class="lbl">Top tag (right side, above the bar)</span>
+			<input type="text" id="blt_tag_top" spellcheck="false"></label>
+		<label class="field"><span class="lbl">Bottom tag (left side, below the bar)</span>
+			<input type="text" id="blt_tag_bottom" spellcheck="false"></label>
+	</fieldset>
+
+	<fieldset>
+		<legend>Style</legend>
+		<div class="style-grid">
+			<label class="field"><span class="lbl">Accent</span>
+				<input type="color" id="blt_accent_color"></label>
+			<label class="field"><span class="lbl">Bar</span>
+				<input type="color" id="blt_bar_color"></label>
+			<label class="field"><span class="lbl">Titles</span>
+				<input type="color" id="blt_title_color"></label>
+			<label class="field"><span class="lbl">Subtitles</span>
+				<input type="color" id="blt_sub_color"></label>
+			<label class="field"><span class="lbl">Tag text</span>
+				<input type="color" id="blt_tag_text_color"></label>
+			<div>
+				<label class="check-cell"><input type="checkbox" id="blt_divider_switch"><span>Center divider</span></label>
+				<label class="check-cell"><input type="checkbox" id="blt_chips_switch"><span>EN / FR chips</span></label>
+			</div>
+		</div>
+	</fieldset>
+
+	<fieldset>
+		<legend>Layout &amp; timing</legend>
+		<div class="row">
+			<label class="row-lbl" for="blt_scale">Scale</label>
+			<input type="range" id="blt_scale" min="50" max="200" step="1">
+			<span class="readout" id="blt-scale-readout">100%</span>
+		</div>
+		<div class="row">
+			<label class="row-lbl" for="blt_bottom_offset">Bottom offset (vh)</label>
+			<input type="number" id="blt_bottom_offset" min="0" max="50" step="0.5">
+		</div>
+		<div class="row">
+			<label class="row-lbl" for="blt_side_inset">Side inset (vw)</label>
+			<input type="number" id="blt_side_inset" min="0" max="20" step="0.5">
+		</div>
+		<div class="row">
+			<label class="row-lbl" for="blt_anim_time">Animation time (s)</label>
+			<input type="number" id="blt_anim_time" min="0.5" max="10" step="0.1">
+		</div>
+		<div class="row">
+			<label class="row-lbl" for="blt_active_time">Active time (s)</label>
+			<input type="number" id="blt_active_time" min="0" step="0.5" placeholder="—">
+		</div>
+		<div class="hint">Active time: seconds before auto-hide. Leave empty (or 0) to stay on until hidden manually.</div>
+	</fieldset>
+
+	<fieldset>
+		<legend>Preview</legend>
+		<div class="preview-box" id="blt-preview-box">
+			<iframe id="blt-preview-frame" src="bilingual-browser-source.html?mode=preview" scrolling="no"></iframe>
+		</div>
+		<button id="blt-replay" class="small-btn" type="button">Replay animation</button>
+	</fieldset>
+
+	<footer class="panel-foot">
+		<button id="blt-reset" class="reset-btn" type="button">Reset to defaults</button>
+	</footer>
+
+</div>
+
+<script>
+	"use strict";
+
+	//Default settings — single source of truth. Same key names in localStorage and in
+	//the broadcast object. All values are strings, booleans as "true"/"false"
+	//(same convention as the main Animated Lower Thirds control panel).
+	var DEFAULTS = {
+		"blt_switch"         : "false",
+		"blt_en_title"       : "WELCOME TO THE BROADCAST",
+		"blt_en_sub"         : "The morning show — live",
+		"blt_fr_title"       : "BIENVENUE À L'ÉMISSION",
+		"blt_fr_sub"         : "L'émission du matin — en direct",
+		"blt_tag_top"        : "LIVE • EN DIRECT",
+		"blt_tag_bottom"     : "John Doe — Guest Speaker / Invité",
+		"blt_accent_color"   : "#E70046",
+		"blt_bar_color"      : "#FFFFFF",
+		"blt_title_color"    : "#E70046",
+		"blt_sub_color"      : "#1A1F1E",
+		"blt_tag_text_color" : "#FFFFFF",
+		"blt_scale"          : "100",
+		"blt_bottom_offset"  : "5",
+		"blt_side_inset"     : "0",
+		"blt_anim_time"      : "2",
+		"blt_active_time"    : "",
+		"blt_divider_switch" : "true",
+		"blt_chips_switch"   : "true"
+	};
+
+	var CHECK_KEYS = ["blt_divider_switch", "blt_chips_switch"];
+
+	var bc  = new BroadcastChannel("bilingual-lt-channel");  //Send to the browser source
+	var bcr = new BroadcastChannel("bilingual-lt-channel2"); //Receive from the browser source
+
+	var switchOn = false;
+
+	function el(id) { return document.getElementById(id); }
+
+	//Collect the current UI state as a full flat settings object
+	function getSettings() {
+		var s = {};
+		Object.keys(DEFAULTS).forEach(function(key) {
+			if (key === "blt_switch") {
+				s[key] = switchOn ? "true" : "false";
+			} else if (CHECK_KEYS.indexOf(key) !== -1) {
+				s[key] = el(key).checked ? "true" : "false";
+			} else {
+				s[key] = el(key).value;
+			}
+		});
+		return s;
+	}
+
+	//Broadcast the FULL settings object to the source
+	function broadcast() {
+		bc.postMessage(getSettings());
+	}
+
+	function save(key, value) {
+		localStorage.setItem(key, value);
+	}
+
+	function updateSwitchBtn() {
+		var btn = el("blt-switch-btn");
+		if (switchOn) {
+			btn.classList.add("on");
+			btn.textContent = "ON AIR — HIDE";
+		} else {
+			btn.classList.remove("on");
+			btn.textContent = "SHOW";
+		}
+	}
+
+	function updateScaleReadout() {
+		el("blt-scale-readout").textContent = el("blt_scale").value + "%";
+	}
+
+	//Push a settings object into the UI (used on load and on reset)
+	function applySettings(s) {
+		Object.keys(DEFAULTS).forEach(function(key) {
+			var v = (s[key] !== undefined && s[key] !== null) ? s[key] : DEFAULTS[key];
+			if (key === "blt_switch") {
+				switchOn = (v === "true");
+			} else if (CHECK_KEYS.indexOf(key) !== -1) {
+				el(key).checked = (v === "true");
+			} else {
+				el(key).value = v;
+			}
+		});
+		updateSwitchBtn();
+		updateScaleReadout();
+	}
+
+	//Restore every field from localStorage (fall back to defaults)
+	function restore() {
+		var s = {};
+		Object.keys(DEFAULTS).forEach(function(key) {
+			var v = localStorage.getItem(key);
+			s[key] = (v !== null) ? v : DEFAULTS[key];
+		});
+		applySettings(s);
+	}
+
+	//Wire every field: persist the changed key + broadcast the full object.
+	//Text/number/color/range use the "input" event so on-screen text and style
+	//update live while typing/dragging (the source updates without replaying).
+	Object.keys(DEFAULTS).forEach(function(key) {
+		if (key === "blt_switch") return;
+		var input = el(key);
+		if (CHECK_KEYS.indexOf(key) !== -1) {
+			input.addEventListener("change", function() {
+				save(key, input.checked ? "true" : "false");
+				broadcast();
+			});
+		} else {
+			input.addEventListener("input", function() {
+				if (key === "blt_scale") updateScaleReadout();
+				save(key, input.value);
+				broadcast();
+			});
+		}
+	});
+
+	//Master SHOW / HIDE switch
+	el("blt-switch-btn").addEventListener("click", function() {
+		switchOn = !switchOn;
+		save("blt_switch", switchOn ? "true" : "false");
+		updateSwitchBtn();
+		broadcast();
+	});
+
+	//Replay button: the source in preview mode replays OUT -> IN
+	el("blt-replay").addEventListener("click", function() {
+		bc.postMessage({ preview_replay: true });
+	});
+
+	//Reset: clear ONLY blt_* keys, restore defaults, re-broadcast
+	el("blt-reset").addEventListener("click", function() {
+		if (!confirm("Reset the bilingual lower third to its default settings?")) return;
+		var keys = [];
+		for (var i = 0; i < localStorage.length; i++) {
+			var k = localStorage.key(i);
+			if (k && k.indexOf("blt_") === 0) keys.push(k);
+		}
+		keys.forEach(function(k) { localStorage.removeItem(k); });
+		applySettings(DEFAULTS);
+		broadcast();
+	});
+
+	//Messages from the source
+	bcr.onmessage = function(ev) {
+		var d = ev.data || {};
+		if (d.resend) {
+			//Source (re)loaded and asks for the current settings
+			broadcast();
+		}
+		if (d.turnedOff) {
+			//Source auto-hid itself after active-time: flip the switch UI off
+			//WITHOUT re-broadcasting a hide (it is already hidden)
+			switchOn = false;
+			save("blt_switch", "false");
+			updateSwitchBtn();
+		}
+	};
+
+	//Scale the 1920x1080 preview iframe into the 16:9 box
+	function fitPreview() {
+		var box = el("blt-preview-box");
+		el("blt-preview-frame").style.transform = "scale(" + (box.clientWidth / 1920) + ")";
+	}
+	window.addEventListener("resize", fitPreview);
+	if (window.ResizeObserver) {
+		new ResizeObserver(fitPreview).observe(el("blt-preview-box"));
+	}
+
+	//Init: restore fields, then broadcast the full object once on load
+	restore();
+	broadcast();
+	fitPreview();
+</script>
+</body>
+</html>
